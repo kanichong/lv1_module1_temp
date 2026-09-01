@@ -80,3 +80,160 @@
    주기 : 모터 속도 제어를 일정한 시간 간격(10ms)마다 실행하는 것처럼, 작업이 반복 실행되는 시간 간격이다.
    지연 : 장애물 감지 결과를 받아 모터에 정지 명령을 내리기까지 데이터 처리, 응답에 걸리는 소요시간(50ms)을 말한다.
    지터 : 모터나 센서가 주기적으로 들어와야 하는 데이터가 스케쥴링이나 다른 요인으로 실행 간격이 달라지는 현상(주기의 변동성)을 말한다.
+
+
+
+
+## 문제 2. 원격 접속(SSH)과 센서 장치 경로 고정
+
+1. **고른 접속 대상**: `localhost`
+   내 서버 ssh를 설치 한다.(openssh)
+   ```sudo apt install openssh-server```
+   **active(running) 확인**
+   ```systemctl status ssh```
+   ```
+   ssh.service - OpenBSD Secure Shell server
+   Loaded: loaded (/lib/systemd/system/ssh.service; enabled; vendor preset: enabled)
+   Active: active (running)
+   ```
+   **22번 포트 확인**
+   ```ss -tlnp | grep :22```
+   **localhost로 접속**
+   ```ssh 사용자@localhost```
+   ```
+   Welcome to Ubuntu 22.04.5 LTS (GNU/Linux 6.8.0-138-generic x86_64)
+   ```
+   ```
+   pa8@pa8-Legion-Pro-5-16IAX10:~$ who
+   pa8      tty2         2026-09-01 09:04 (tty2)
+   pa8      pts/3        2026-09-01 13:42 (127.0.0.1)
+   pa8@pa8-Legion-Pro-5-16IAX10:~$ echo $SSH_CONNECTION
+   127.0.0.1 51124 127.0.0.1 22
+   ```
+   
+   
+2. **개인키·공개키 중 서버에 등록하는 것**: 
+   서버에 올라가는 것은 공개키이고, 개인키는 기기에만 보관하므로 공개키가 노출되어도 개인키 없이는 서명 위조나 복호화가 불가능해 안전.
+   
+   
+3. **원격 단일 명령 실행과 `scp` 전송 출력**
+   접속하지 않고 명령만 실행
+   ```
+   ssh 사용자@서버 'uname -a
+   ```
+   ```
+   ssh pa8@localhost 'uname -a'
+   Linux pa8-Legion-Pro-5-16IAX10 6.8.0-138-generic #138~22.04.1-Ubuntu SMP
+   PREEMPT_DYNAMIC Fri Aug  7 13:43:15 UTC  x86_64 x86_64 x86_64 GNU/Linux
+   ```
+   파일 복사
+   ```
+   scp 파일 사용자@아이피:절대위치
+   ```
+   ```
+   pa8@pa8-Legion-Pro-5-16IAX10:~/fake_sensors$ scp hi.txt pa8@localhost:/home/pa8/
+   hi.txt                                                                                   100%    0     0.0KB/s   00:00
+   ```
+   
+   시리얼 장치 확인
+   ```
+   ls -l /dev/tty*
+   ```
+   ```
+   pa8@pa8-Legion-Pro-5-16IAX10:~$ ls -l /dev/tty*
+   crw--w---- 1 root tty     4, 19 Sep  1 09:04 /dev/tty19
+   crw--w---- 1 pa8  tty     4,  2 Sep  1 09:04 /dev/tty2
+   crw------- 1 root root    5,  3 Sep  1 09:04 /dev/ttyprintk
+   crw-rw---- 1 root dialout 4, 64 Sep  1 09:04 /dev/ttyS0
+   ```
+   
+   
+4. **두 장치를 구분한 속성**: 라이다 `___` / IMU `___`
+   가상 sensor 장치 생성
+   ```
+   mkdir -p ~/fake_sensors && cd ~/fake_sensors
+   ```
+   파일생성 10M 크기로
+   ```
+   truncate -s 10M lidar.img imu.img
+   ```
+   블록장치로 연결
+   ```
+   sudo losetup -f --show lidar.img
+   sudo losetup -f --show imu.img
+   ```
+   udev데몬의 단계별로 속성 출력
+   ```
+   udevadm info --attribute-walk /dev/loop(N)
+   ```
+   ```
+   pa8@pa8-Legion-Pro-5-16IAX10:~/fake_sensors$ udevadm info --attribute-walk /dev/loop22
+   looking at device '/devices/virtual/block/loop22':
+    KERNEL=="loop22"
+    SUBSYSTEM=="block"
+    DRIVER==""
+   ```
+   
+   
+5. **작성한 udev 규칙 2개** + **규칙 키 설명표**
+   
+   규칙파일 수정
+   /etc/udev/rules.d/99-robot-sensor.rules
+   ```
+   # virtual robot sensor rules
+   
+   # LiDAR
+   SUBSYSTEM=="block", KERNEL=="loop22", SYMLINK+="robot_lidar", MODE="0666"
+   
+   # IMU
+   SUBSYSTEM=="block", KERNEL=="loop23", SYMLINK+="robot_imu", MODE="0666"
+   ```
+
+| 규칙        | 설명                                                                                                              |
+| --------- | --------------------------------------------------------------------------------------------------------------- |
+| SUBSYSTEM | 장치가 속한 udev 서브시스템. 블록 장치=block, USB=tty                                                                         |
+| KERNEL    | 커널이 부여한 장치 이름 패턴을 조건으로 비교합니다.                                                                                   |
+| ATTR{...} | sysfs의 장치 속성을 읽어 조건으로 비교하거나 값을 설정합니다. 실제 USB 센서는 ATTRS{idVendor}, ATTRS{idProduct}, ATTRS{serial}처럼 식별에 주로 씁니다. |
+| SYMLINK   | 기존 장치는 유지하면서, 같은 장치를 가리키는 추가 심볼릭 링크.                                                                            |
+| MODE      | 장치 파일의 권한을 설정합니다. 일반적으로 그룹에 읽기·쓰기 권한을 주기 위해 "0660"을 사용합니다.                                                      |
+| GROUP     | 장치 파일의 소유 그룹을 설정합니다. 해당 그룹에 사용자를 넣으면 sudo 없이 장치에 접근하게 할 수 있습니다.                                                 |
+| ==        | **비교 연산자**. 장치의 현재 속성이 오른쪽 값과 일치할 때만 규칙이 적용됩니다.                                                                 |
+| =         | **값 설정 연산자**. 해당 키의 값을 지정합니다. 목록 성격의 키에서는 기존 값을 대체할 수 있습니다.                                                     |
+| +=        | **추가 연산자**. 기존 값은 유지하고 새 항목을 덧붙입니다. SYMLINK에는 보통 이것을 사용합니다.                                                     |
+
+   
+6. **순서를 바꿔 재연결한 뒤 `ls -l /dev/robot_*` 결과**
+   ```
+   ls -l /dev/robot_*
+   lrwxrwxrwx 1 root root 6 Sep  1 14:17 /dev/robot_imu -> loop23
+   lrwxrwxrwx 1 root root 6 Sep  1 14:16 /dev/robot_lidar -> loop22
+   ```
+   
+   ```
+   sudo losetup -d lidar.img
+   sudo losetup -d imu.img
+   sudo udevadm trigger
+   sudo losetup -f --show imu.img
+   sudo losetup -f --show lidar.img
+   sudo udevadm trigger
+   ls -l /dev/robot_*
+   lrwxrwxrwx 1 root root 6 Sep  1 15:10 /dev/robot_imu -> loop23
+   lrwxrwxrwx 1 root root 6 Sep  1 15:10 /dev/robot_lidar -> loop22
+   ```
+   
+   
+   
+7. **실제 USB 센서용 규칙 초안과 구분 근거**
+   
+   실제 USB 센서용 규칙 초안
+  ```
+  # 라이다 설정
+  SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", MODE="0666", SYMLINK+="robot_lidar"
+  # IMU 설정
+  SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", MODE="0666", SYMLINK+="robot_imu"
+  ```
+   
+   동일안 idVendor를 갖고 idProduct만 다른 상황에서 리눅스 커널에서 vendor와 product모두 비교하여 분류. idProduct까지 같다면 Serial번호, 포트 번호까지 구분하여 분류를 할 수 있다.
+   
+
+
